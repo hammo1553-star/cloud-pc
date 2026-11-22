@@ -15,21 +15,21 @@ jobs:
           Start-Process -FilePath ".\tailscale.exe" -ArgumentList "/S" -Wait
 
       - name: Enable RDP & Create User
+        env:
+          PASS: ${{ secrets.RDP_PASSWORD }}
         run: |
-          net user runneradmin Admin@123456
+          net user runneradmin $env:PASS
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
 
-      - name: Connect Tailscale
+      - name: Connect Tailscale Automatically
+        env:
+          TS_KEY: ${{ secrets.TS_AUTHKEY }}
         run: |
-          & "C:\Program Files\Tailscale\tailscale.exe" up --unattended --force-reauth
+          & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=$env:TS_KEY --hostname=my-pc --unattended
 
       - name: Keep Alive (6 Hours)
         run: |
-          Write-Host "========================================="
-          Write-Host "RDP IS READY! CHECK YOUR TAILSCALE APP FOR THE IP"
-          Write-Host "Username: runneradmin"
-          Write-Host "Password: Admin@123456"
-          Write-Host "========================================="
+          Write-Host "RDP IS READY! Connect to: my-pc"
           Start-Sleep -Seconds 21600

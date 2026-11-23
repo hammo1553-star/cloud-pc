@@ -9,10 +9,30 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Download & Install Tailscale
+      - name: Install Tailscale, Rclone & WinFsp
         run: |
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "tailscale.exe"
           Start-Process -FilePath ".\tailscale.exe" -ArgumentList "/S" -Wait
+          winget install --id Rclone.Rclone -e --silent --accept-package-agreements --accept-source-agreements
+          winget install --id WinFsp.WinFsp -e --silent --accept-package-agreements --accept-source-agreements
+
+      - name: Setup Google Drive & Restore Chrome Profile
+        env:
+          RCLONE_DATA: ${{ secrets.RCLONE_CONF }}
+        run: |
+          $rcloneDir = "$env:APPDATA\rclone"
+          New-Item -ItemType Directory -Force -Path $rcloneDir
+          Set-Content -Path "$rcloneDir\rclone.conf" -Value $env:RCLONE_DATA
+          
+          # Mount Google Drive as Z: Drive in background
+          Start-Process -FilePath "rclone" -ArgumentList "mount gdrive:CloudPC Z: --vfs-cache-mode full --no-console" -WindowStyle Hidden
+          Start-Sleep -Seconds 5
+          
+          # Restore Chrome Profile if exists on Drive
+          if (Test-Path "Z:\ChromeData") {
+            Stop-Process -Name "chrome" -Force -ErrorAction SilentlyContinue
+            Copy-Item -Path "Z:\ChromeData\*" -Destination "$env:LOCALAPPDATA\Google\Chrome\User Data\" -Recurse -Force
+          }
 
       - name: Enable RDP & Create User
         env:
@@ -29,7 +49,13 @@ jobs:
         run: |
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=$env:TS_KEY --hostname=my-pc --unattended
 
-      - name: Keep Alive (6 Hours)
+      - name: Keep Alive & Auto-Sync Every 2 Minutes
         run: |
-          Write-Host "RDP IS READY! Connect to: my-pc"
-          Start-Sleep -Seconds 21600
+          Write-Host "RDP IS READY! Drive Z: is mounted & Auto-Sync is ON"
+          New-Item -ItemType Directory -Force -Path "Z:\ChromeData" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "Z:\MyApps" -ErrorAction SilentlyContinue
+          
+          for ($i=0; $i -lt 180; $i++) {
+            Start-Sleep -Seconds 120
+            robocopy "$env:LOCALAPPDATA\Google\Chrome\User Data\Default" "Z:\ChromeData\Default" /MIR /XD "Cache" "Code Cache" "GPUCache" /R:1 /W:1 /NFL /NDL /NJH /NJS
+          }

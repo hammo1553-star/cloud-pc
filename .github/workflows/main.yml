@@ -1,4 +1,4 @@
-name: Windows-RDP
+name: Windows-RDP-Pro
 
 on:
   workflow_dispatch:
@@ -9,32 +9,78 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Install Tailscale, Rclone & WinFsp
+      - name: 1. Install Tailscale, Rclone & WinFsp
         run: |
+          # Install Tailscale
           Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-latest.exe" -OutFile "tailscale.exe"
           Start-Process -FilePath ".\tailscale.exe" -ArgumentList "/S" -Wait
-          winget install --id Rclone.Rclone -e --silent --accept-package-agreements --accept-source-agreements
+
+          # Direct Download Rclone (Fixed Path)
+          Invoke-WebRequest -Uri "https://downloads.rclone.org/rclone-current-windows-amd64.zip" -OutFile "rclone.zip"
+          Expand-Archive -Path "rclone.zip" -DestinationPath "C:\rclone-temp" -Force
+          New-Item -ItemType Directory -Force -Path "C:\rclone"
+          Move-Item -Path "C:\rclone-temp\rclone-*\rclone.exe" -Destination "C:\rclone\rclone.exe" -Force
+
+          # Install WinFsp for Drive Mounting
           winget install --id WinFsp.WinFsp -e --silent --accept-package-agreements --accept-source-agreements
 
-      - name: Setup Google Drive & Restore Chrome Profile
+      - name: 2. Optimize Windows (Speed, Display DPI & Keyboard)
+        run: |
+          # High Performance Power Plan
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+
+          # Disable heavy visual effects & animations for faster RDP
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" -Name "VisualFXSetting" -Value 2 -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00))
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop\WindowMetrics" -Name "MinAnimate" -Value "0"
+
+          # Optimize Screen Readability (125% Scaling + ClearType Fonts)
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "Win8DpiScaling" -Value 1
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "LogPixels" -Value 120
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "FontSmoothing" -Value "2"
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "FontSmoothingType" -Value 2
+
+          # Fix Keyboard: Add English (US) & Arabic (Egypt) Layouts
+          $LangList = New-WinUserLanguageList en-US
+          $LangList.Add("ar-EG")
+          Set-WinUserLanguageList $LangList -Force
+
+      - name: 3. Mount Google Drive (Z:) & Full Restore
         env:
           RCLONE_DATA: ${{ secrets.RCLONE_CONF }}
         run: |
           $rcloneDir = "$env:APPDATA\rclone"
           New-Item -ItemType Directory -Force -Path $rcloneDir
           Set-Content -Path "$rcloneDir\rclone.conf" -Value $env:RCLONE_DATA
-          
-          # Mount Google Drive as Z: Drive in background
-          Start-Process -FilePath "rclone" -ArgumentList "mount gdrive:CloudPC Z: --vfs-cache-mode full --no-console" -WindowStyle Hidden
-          Start-Sleep -Seconds 5
-          
-          # Restore Chrome Profile if exists on Drive
-          if (Test-Path "Z:\ChromeData") {
+
+          # Mount Google Drive as Z:
+          Start-Process -FilePath "C:\rclone\rclone.exe" -ArgumentList "mount gdrive:CloudPC Z: --vfs-cache-mode full --vfs-cache-max-age 1h --no-console" -WindowStyle Hidden
+          Start-Sleep -Seconds 7
+
+          # Create Persistent Folders if first run
+          New-Item -ItemType Directory -Force -Path "Z:\ChromeData\Default" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "Z:\Desktop" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "Z:\Documents" -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "Z:\MyApps" -ErrorAction SilentlyContinue
+
+          # Restore Chrome Profile
+          if (Test-Path "Z:\ChromeData\Default") {
             Stop-Process -Name "chrome" -Force -ErrorAction SilentlyContinue
-            Copy-Item -Path "Z:\ChromeData\*" -Destination "$env:LOCALAPPDATA\Google\Chrome\User Data\" -Recurse -Force
+            New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\Google\Chrome\User Data\Default"
+            robocopy "Z:\ChromeData\Default" "$env:LOCALAPPDATA\Google\Chrome\User Data\Default" /E /R:1 /W:1 /NFL /NDL /NJH /NJS
           }
 
-      - name: Enable RDP & Create User
+          # Restore Desktop & Documents
+          robocopy "Z:\Desktop" "$env:USERPROFILE\Desktop" /E /R:1 /W:1 /NFL /NDL /NJH /NJS
+          robocopy "Z:\Documents" "$env:USERPROFILE\Documents" /E /R:1 /W:1 /NFL /NDL /NJH /NJS
+
+          # Create Shortcut to Z:\MyApps on Desktop
+          $WshShell = New-Object -comObject WScript.Shell
+          $Shortcut = $WshShell.CreateShortcut("$env:USERPROFILE\Desktop\MyApps (5TB).lnk")
+          $Shortcut.TargetPath = "Z:\MyApps"
+          $Shortcut.Save()
+
+      - name: 4. Enable RDP & Configure User
         env:
           PASS: ${{ secrets.RDP_PASSWORD }}
         run: |
@@ -43,19 +89,22 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 1
 
-      - name: Connect Tailscale Automatically
+      - name: 5. Connect Tailscale Automatically
         env:
           TS_KEY: ${{ secrets.TS_AUTHKEY }}
         run: |
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey=$env:TS_KEY --hostname=my-pc --unattended
 
-      - name: Keep Alive & Auto-Sync Every 2 Minutes
+      - name: 6. Keep Alive & Auto-Sync Everything (Every 2 Mins)
         run: |
-          Write-Host "RDP IS READY! Drive Z: is mounted & Auto-Sync is ON"
-          New-Item -ItemType Directory -Force -Path "Z:\ChromeData" -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force -Path "Z:\MyApps" -ErrorAction SilentlyContinue
-          
+          Write-Host "================================================="
+          Write-Host "CLOUD PC PRO IS READY! Drive Z: & Auto-Sync Active"
+          Write-Host "================================================="
           for ($i=0; $i -lt 180; $i++) {
             Start-Sleep -Seconds 120
-            robocopy "$env:LOCALAPPDATA\Google\Chrome\User Data\Default" "Z:\ChromeData\Default" /MIR /XD "Cache" "Code Cache" "GPUCache" /R:1 /W:1 /NFL /NDL /NJH /NJS
+            # Sync Chrome Profile
+            robocopy "$env:LOCALAPPDATA\Google\Chrome\User Data\Default" "Z:\ChromeData\Default" /MIR /XD "Cache" "Code Cache" "GPUCache" "Service Worker" /R:1 /W:1 /NFL /NDL /NJH /NJS
+            # Sync Desktop & Documents
+            robocopy "$env:USERPROFILE\Desktop" "Z:\Desktop" /MIR /XF "MyApps (5TB).lnk" /R:1 /W:1 /NFL /NDL /NJH /NJS
+            robocopy "$env:USERPROFILE\Documents" "Z:\Documents" /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS
           }
